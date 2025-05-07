@@ -1,0 +1,316 @@
+---
+title: "Warren_SobolODE"
+author: "Kelsey Warren"
+format: html
+editor: visual
+---
+
+# Assignment: Sobol with ODE modeling forest growth
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(deSolve)
+library(sensitivity)
+library(here)
+
+```
+
+## 1. Forest growth model
+
+```{r}
+# load and view the forest growth function
+source(here("R/dforest.R"))
+dforest
+
+```
+
+## 2. Run model using ODE
+
+```{r run model}
+
+# INITIAL ODE RUN 
+# run ODE
+# make parameters list
+Cinitial <- 10
+parms_for_plot <- list(r=0.01, K=250, g=2, Cthresh=50)
+
+result_for_plot <- ode(y = Cinitial, times = seq(from = 1, to = 300), func = dforest, parms = parms_for_plot)
+
+colnames(result_for_plot) <- c("time", "C")
+result_for_plot <- as.data.frame(result_for_plot)
+
+```
+
+## 3. Plot results of initial ODE run
+
+```{r plot}
+# plot initial ODE run
+ggplot(result_for_plot, aes(time, C)) +
+  geom_line(col = "forestgreen") +
+  labs(y = "Forest Size (kg C)", title = "Forest Size")
+```
+
+## 4. Run Sobol global on parameters and maximum forest size
+
+### Sobol: Prep and Run
+
+```{r Sobol object}
+# load and view the forest growth function
+source(here("R/dforest.R"))
+dforest
+
+# MAKE PARAMETERS FOR SOBOL
+# forest starts at 10kgC 
+Cinitial <- 10
+
+# create X1 the first set of parameters
+np <- 2000
+g <- rnorm(mean = 2, sd = 0.1*2, n = np)
+r <- rnorm(mean = 0.01, sd = 0.1*0.01, n = np)
+K <- rnorm(mean = 250, sd = 0.1*250, n = np)
+Cthresh <- rnorm(mean = 50, sd = 0.1*50, n = np)
+FX1 <- cbind.data.frame(r = r, K = K, g = g, Cthresh = Cthresh)
+
+# create X2 the second set of parameters
+np <- 2000
+g <- rnorm(mean = 2, sd = 0.1*2, n = np)
+r <- rnorm(mean = 0.01, sd = 0.1*0.01, n = np)
+K <- rnorm(mean = 250, sd = 0.1*250, n = np)
+Cthresh <- rnorm(mean = 50, sd = 0.1*50, n = np)
+FX2 <- cbind.data.frame(r = r, K = K, g = g, Cthresh = Cthresh)
+
+# get rid of negative values
+FX1 <- FX1 %>% map_df(pmax, 0.0) 
+FX2 <- FX2 %>% map_df(pmax, 0.0) 
+
+# create Sobol object (+ generates sets of parameters that we'll use to run the dforest model)
+sens_F <- sobolSalt(model = NULL, FX1, FX2, nboot = 300) #sens_F is the Sobol object
+# view parameter sets
+sens_F$X[1:5, 1:4]
+
+# add names to sens_F sobol object
+colnames(sens_F$X) <- c("r", "K", "g", "Cthresh")
+# view again
+sens_F$X[1:5, 1:4]
+
+```
+
+### ODE: Prep and Run
+
+```{r}
+# GET ALL PARAMETERS READY FOR SOBOL
+# view the first parameter set
+sens_F$X[1, ] 
+
+# ODE needs ALL of our parameters in a single list
+# initial population and times for which we want output
+Cinitial
+
+# gets results for 300 years (evaluating every year)
+Fsimtimes <- seq(from = 1, to = 300)
+
+# make parameters list Fparms
+Fparms <- list(r = as.data.frame(sens_F$X)$r[1], 
+               K = as.data.frame(sens_F$X)$K[1], 
+               g = as.data.frame(sens_F$X)$g[1], 
+               Cthresh = as.data.frame(sens_F$X)$Cthresh[1])
+
+# run ODE
+Fresult <- ode(y = Cinitial, times = Fsimtimes, func = dforest, parms = Fparms)
+
+# make Fresult a nice data frame
+colnames(Fresult) <- c("time", "C")
+Fresult <- as.data.frame(Fresult)
+
+# view results of ODE
+head(Fresult)
+
+```
+
+### Metric Function
+
+```{r}
+# create function for calculating metrics for all parameters
+calc_metrics <- function(Fresult) {
+  maxC <- max(Fresult$C)
+  return(list(maxC = maxC))
+}
+
+```
+
+### Wrapper Function
+
+```{r}
+# wrapper function will run ODE and metrics functions
+f_wrapper <- function(r, K, g, Cthresh, Cinitial, Fsimtimes, odefunc, metricfunc) {
+  Fparms <- list(r = r, K = K, g=g, Cthresh=Cthresh)
+  Fresult <- ode(y = Cinitial, times = Fsimtimes, func = odefunc, parms = Fparms, method="euler")
+  colnames(Fresult) <- c("time", "C")
+  
+  # calculate metrics now
+  metrics_res <- metricfunc(as.data.frame(Fresult))
+  return(metrics_res)
+}
+
+# test the wrapper function
+f_wrapper(r = 0.01, K = 250, g = 2, Cthresh = 50, Cinitial = 10, Fsimtimes = seq(from = 1, to = 300), odefunc = dforest, metricfunc = calc_metrics)
+
+```
+
+### Run Wrapper for All Parameters
+
+```{r}
+
+# use pmap for wrapper function on all parameters
+Fallresults <- as.data.frame(sens_F$X) %>% pmap(f_wrapper, Cinitial = Cinitial, Fsimtimes = Fsimtimes, odefunc = dforest, metricfunc = calc_metrics)
+
+# convert results from pmap into dataframe
+Fallres <- Fallresults %>% map_dfr(`[`, "maxC")
+# organize said dataframe
+Fallres_organized <- Fallres %>% pivot_longer(cols = everything(), names_to = "metric", values_to = "value")
+
+```
+
+## 5. Graph results as boxplot and record Sobol indices
+
+### Boxplots
+
+```{r}
+# plot the above the results as boxplots
+ggplot(Fallres_organized, aes(metric, value)) +
+  geom_boxplot(col="forestgreen")
+
+```
+
+### Sobol Indices
+
+```{r}
+# tell sobol object: here are all the results I got from the parameters suggested; tell me the main effect (variance associated with each parameter) and total effect (variance associated with each parameter AND how parameters interact)
+sens_F_maxC <- sensitivity::tell(sens_F, Fallres$maxC) 
+
+
+# if 0 is in the confidence interval, the result is not rly sensitive to this parameter 
+# r doesn't matter on its own (0 in conf interval), but r matters when we account for interactions with K
+
+# main effect (first-order indices aka no interactions between parameters) 
+rownames(sens_F_maxC$S) <- c("r", "K", "g", "Cthresh")
+sens_F_maxC$S
+
+# total effect (includes interactions between parameters)
+rownames(sens_F_maxC$T) <- c("r", "K", "g", "Cthresh")
+sens_F_maxC$T
+
+# Record main and total effects
+# main effect indices
+main_effects <- as.data.frame(sens_F_maxC$S)
+main_effects$Parameter <- rownames(main_effects)
+
+# total effect indices
+total_effects <- as.data.frame(sens_F_maxC$T)
+total_effects$Parameter <- rownames(total_effects)
+
+# combine the two tables
+sobol_summary <- merge(main_effects, total_effects, by = "Parameter", suffixes = c("_Main", "_Total"))
+sobol_summary
+
+```
+
+## 6. Writeup
+
+-   Main effect: not considering interactions between parameters, max forest size is most sensitive to K and r, then g, then not much to Cthresh.
+
+-   Total effect: considering interactions between parameters, max forest size is most sensitive to r, then K, then g, and not much to Cthresh. Maximum forest size is more sensitive to r when interactions between parameters are considered.
+
+In the context of climate change and future forests, maximum forest size may be more highly affected by changes in K and r than factors like g and Cthresh. More specifically, climate change could alter potential future carrying capacities of forest size (K) and exponential growth rates (r) due to shifting water availability and temperature trends, impacting the maximum forest size reached. Overall, both the rate of growth of a forest before canopy closure and the carrying capacity (in terms of forest size) are important factors in determining maximum forest size.
+
+## Extra Credit
+
+### Forest size at 100 years
+
+```{r}
+
+# redoing second half of step 4 and 5 with additional metric: forest size at 100 years
+
+
+# create function for calculating metrics for all parameters
+calc_metrics2 <- function(Fresult) {
+  maxC <- max(Fresult$C)
+  size_100 <- Fresult$C[Fresult$time == 100]
+  return(list(maxC = maxC, size_100 = size_100))
+}
+
+
+
+
+# wrapper function will run ODE and metrics functions
+f_wrapper2 <- function(r, K, g, Cthresh, Cinitial, Fsimtimes, odefunc, metricfunc) {
+  Fparms <- list(r = r, K = K, g=g, Cthresh=Cthresh)
+  Fresult2 <- ode(y = Cinitial, times = Fsimtimes, func = odefunc, parms = Fparms, method="euler")
+  colnames(Fresult2) <- c("time", "C")
+  
+  # calculate metrics now
+  metrics_res2 <- metricfunc(as.data.frame(Fresult2))
+  return(metrics_res2)
+}
+
+# test the wrapper function
+f_wrapper2(r = 0.01, K = 250, g = 2, Cthresh = 50, Cinitial = 10, Fsimtimes = seq(from = 1, to = 300), odefunc = dforest, metricfunc = calc_metrics2)
+
+
+
+
+
+
+
+# use pmap for wrapper function on all parameters
+Fallresults2 <- as.data.frame(sens_F$X) %>% pmap(function(r, K, g, Cthresh) {f_wrapper2(r=r, K=K, g=g, Cthresh=Cthresh, Cinitial = Cinitial, Fsimtimes = Fsimtimes, odefunc = dforest, metricfunc = calc_metrics2)})
+
+# convert results from pmap into dataframe
+Fallres2 <- Fallresults2 %>% map_dfr(~tibble(maxC = .x$maxC, size_100 = .x$size_100))
+# organize said dataframe
+Fallres_organized2 <- Fallres2 %>% pivot_longer(cols = everything(), names_to = "metric", values_to = "value")
+
+
+
+
+
+
+# plot the above the results as boxplots
+ggplot(Fallres_organized2, aes(metric, value)) +
+  geom_boxplot()
+
+
+
+
+
+
+# tell sobol object: here are all the results I got from the parameters suggested; tell me the main effect (variance associated with each parameter) and total effect (variance associated with each parameter AND how parameters interact)
+sens_F_maxC2 <- sensitivity::tell(sens_F, Fallres2$maxC) 
+
+
+# if 0 is in the confidence interval, the result is not rly sensitive to this parameter 
+# r doesn't matter on its own (0 in conf interval), but r matters when we account for interactions with K
+
+# main effect (first-order indices aka no interactions between parameters) 
+rownames(sens_F_maxC2$S) <- c("r", "K", "g", "Cthresh")
+sens_F_maxC2$S
+
+# total effect (includes interactions between parameters)
+rownames(sens_F_maxC2$T) <- c("r", "K", "g", "Cthresh")
+sens_F_maxC2$T
+
+# Record main and total effects
+# main effect indices
+main_effects2 <- as.data.frame(sens_F_maxC2$S)
+main_effects2$Parameter <- rownames(main_effects2)
+
+# total effect indices
+total_effects2 <- as.data.frame(sens_F_maxC2$T)
+total_effects2$Parameter <- rownames(total_effects2)
+
+# combine the two tables
+sobol_summary2 <- merge(main_effects, total_effects, by = "Parameter", suffixes = c("_Main", "_Total"))
+sobol_summary2
+```
